@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: phoenix-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  backend:
+    build:
+      context: ./phoenix-backend
+      dockerfile: Dockerfile
+    container_name: phoenix-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - MONGO_URL=mongodb://mongo:27017/phoenix
+      - JWT_SECRET=phoenix-production-jwt-secret-key-32chars!!
+      - CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - mongo
+
+  frontend:
+    build:
+      context: ./phoenix-frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: phoenix-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  mongo-data:
+

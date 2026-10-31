@@ -1,0 +1,140 @@
+name: Phoenix pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mongo:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+    defaults:
+      run:
+        working-directory: phoenix-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-backend-${{ hashFiles('phoenix-backend/package-lock.json') }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+        env:
+          MONGODB_URI: mongodb://localhost:27017/phoenix_test
+          JWT_SECRET: test-secret-that-is-at-least-32-bytes-long
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: phoenix-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-frontend-${{ hashFiles('phoenix-frontend/package-lock.json') }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  e2e:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mongo:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Setup & start backend
+        working-directory: phoenix-backend
+        run: |
+          npm ci
+          npm run build
+          npm run seed:reset
+          npm start &
+        env:
+          MONGODB_URI: mongodb://localhost:27017/phoenix
+          JWT_SECRET: test-secret-that-is-at-least-32-bytes-long
+          PORT: 8000
+      - name: Setup & start frontend
+        working-directory: phoenix-frontend
+        run: |
+          npm ci
+          npm run build
+          npm start &
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+      - name: Wait for services and run smoke tests
+        run: |
+          [ -d scripts ] && SCRIPT_DIR="scripts" || SCRIPT_DIR="phoenix-ci/scripts"
+          chmod +x $SCRIPT_DIR/*.sh
+          ./$SCRIPT_DIR/wait-for.sh http://localhost:8000/api/health 30
+          ./$SCRIPT_DIR/wait-for.sh http://localhost:3000/ 30
+          ./$SCRIPT_DIR/smoke.sh http://localhost:8000 http://localhost:3000
+
+  deploy:
+    needs: [e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install pinned Vercel CLI
+        run: npm install --global vercel@39.1.1
+      - name: Deploy backend to Vercel
+        working-directory: phoenix-backend
+        run: vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} --yes
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_BACKEND_PROJECT_ID }}
+      - name: Deploy frontend to Vercel
+        working-directory: phoenix-frontend
+        run: vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} --yes
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_FRONTEND_PROJECT_ID }}
+
+  verify:
+    needs: [deploy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run verification smoke test against production
+        run: |
+          [ -d scripts ] && SCRIPT_DIR="scripts" || SCRIPT_DIR="phoenix-ci/scripts"
+          chmod +x $SCRIPT_DIR/*.sh
+          ./$SCRIPT_DIR/smoke.sh "${{ vars.BACKEND_URL }}" "${{ vars.FRONTEND_URL }}" "${{ github.sha }}"
